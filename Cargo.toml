@@ -1,34 +1,51 @@
 [package]
 name = "matter"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+resolver = "2"
 
-[target.thumbv6m-none-eabi]
-runner = "elf2uf2-rs -d"
+[profile.dev]
+opt-level = "z"
 
-[build]
-target = "thumbv6m-none-eabi"
+[profile.release]
+opt-level = "z"
+debug = 2
+debug-assertions = false
+lto = "fat"
+codegen-units = 1
+incremental = false
+overflow-checks = false
 
-[env]
-DEFMT_LOG = "info"
+[patch.crates-io]
+rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "next" }
+rs-matter-stack = { git = "https://github.com/sysgrok/rs-matter-stack.git", branch = "next" }
+openthread = { git = "https://github.com/sysgrok/openthread.git", branch = "next" }
+
+[features]
+skip-cyw43-firmware = []
 
 [dependencies]
-embassy-executor = { version = "0.5.0", features = ["arch-cortex-m", "executor-thread", "defmt", "integrated-timers"] }
-embassy-time = { version = "0.3.0", features = ["defmt", "defmt-timestamp-uptime"] }
-embassy-rp = { version = "0.1.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
-embassy-net = { version = "0.4.0", features = ["defmt", "tcp", "udp", "dhcpv4", "medium-ethernet", "igmp"] }
-
-# Pico W Wi-Fi
-cyw43 = { version = "0.1.0", features = ["defmt", "firmware-logs"] }
-cyw43-pio = { version = "0.1.0", features = ["defmt", "overclock"] }
-
-# Matter Stack & Allocator
-rs-matter = { version = "0.1.0-alpha", default-features = false, features = ["embassy-net", "crypto-mbedtls"] }
-embedded-alloc = "0.5.1"
-
-# Standard Embedded Boilerplate
+embassy-executor = { version = "0.10", default-features = false, features = ["platform-cortex-m", "executor-thread", "defmt"] }
+embassy-time = { version = "0.5", default-features = false, features = ["defmt", "defmt-timestamp-uptime-ms"] }
+embassy-rp = { version = "0.10", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp2040"] }
+embassy-futures = "0.1.2"
+embassy-sync = { version = "0.7", features = ["defmt"] }
 defmt = "0.3"
-defmt-rtt = "0.4"
-panic-probe = { version = "0.3", features = ["print-defmt"] }
-cortex-m = "0.7"
+embedded-alloc = "0.6"
+rs-matter-embassy = { git = "https://github.com/sysgrok/rs-matter-embassy.git", features = ["embassy-net", "rp", "defmt"] }
+
+bt-hci = { version = "0.8", default-features = false, features = ["defmt"] }
+cyw43 = { version = "0.7", features = ["firmware-logs", "defmt", "bluetooth"] }
+cyw43-pio = "0.10"
+
+cortex-m = "0.7.6"
 cortex-m-rt = "0.7"
+
+rtt-target = { version = "0.6", features = ["defmt"] }
+panic-rtt-target = "0.2"
+
+static_cell = "2"
+portable-atomic = { version = "1.5", features = ["critical-section"] }
+
+[build-dependencies]
+reqwest = { version = "0.12.9", features = ["blocking"] }
