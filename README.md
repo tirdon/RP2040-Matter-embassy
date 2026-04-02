@@ -1,52 +1,49 @@
-# Matter Light — Raspberry Pi Pico W
+# Matter Light — Raspberry Pi Pico W (Rust)
 
-A Matter-compatible On/Off Light device running on the Raspberry Pi Pico W, written in Rust.
+A Matter-compatible device implementation for the Raspberry Pi Pico W using the Embassy async runtime.
 
-Uses [rs-matter-embassy](https://github.com/sysgrok/rs-matter-embassy) with the Embassy async runtime, CYW43 WiFi + BLE driver, and the Matter protocol stack.
+## Project Status
+
+- **`src/main.rs`**: Current "Hello World" test (Blinks the onboard LED via CYW43).
+- **`src/main_matter.rs`**: The full Matter On/Off Light implementation.
 
 ## Requirements
 
 - **Rust nightly** with `thumbv6m-none-eabi` target
-- **probe-rs** (debug probe) or **elf2uf2-rs** (USB bootloader)
+- **elf2uf2-rs** (for USB bootloader flashing) or **probe-rs** (for debug probes)
 
 ```sh
 rustup default nightly
 rustup target add thumbv6m-none-eabi
-cargo install probe-rs-tools
+cargo install elf2uf2-rs
 ```
 
-## Build & Flash
+## Build & Flash (USB Bootloader)
 
+1. **Enter BOOTSEL Mode**: Hold the **BOOTSEL** button on your Pico W while plugging it into your USB port.
+2. **Build and Convert**:
+   ```sh
+   cargo build --release
+   elf2uf2-rs target/thumbv6m-none-eabi/release/matter matter.uf2
+   ```
+3. **Flash**: Copy `matter.uf2` to the `RPI-RP2` volume.
+   ```sh
+   cp matter.uf2 /Volumes/RPI-RP2/
+   ```
+
+## Swapping Implementations
+
+To switch back to the Matter implementation:
 ```sh
-# Build (first run auto-downloads CYW43 firmware)
-cargo build
-
-# Flash via debug probe
-cargo run --release
+mv src/main.rs src/main_blink.rs
+mv src/main_matter.rs src/main.rs
 ```
 
-## What it does
+## Technologies Used
 
-- Connects to WiFi and advertises as a Matter device
-- Commissions over BLE (concurrent with WiFi)
-- Exposes an **On/Off Light** cluster on Endpoint 1
-- Uses test commissioning data for development
-
-## Project structure
-
-```
-.cargo/config.toml   — target, runner, build-std config
-Cargo.toml           — dependencies (embassy 0.10, cyw43 0.7, rs-matter-embassy)
-build.rs             — linker setup + CYW43 firmware download
-memory.x             — RP2040 memory layout (2MB flash, 264KB RAM)
-src/main.rs          — Matter light device implementation
-```
-
-## References
-
-- [rs-matter-embassy examples](https://github.com/sysgrok/rs-matter-embassy/tree/master/examples/rp)
-- [Embassy](https://embassy.dev)
-- [Matter specification](https://csa-iot.org/all-solutions/matter/)
+- [Embassy](https://embassy.dev): Async runtime for embedded Rust.
+- [rs-matter-embassy](https://github.com/sysgrok/rs-matter-embassy): Matter protocol stack for Embassy.
+- [cyw43](https://github.com/embassy-rs/embassy/tree/main/cyw43): Driver for the Pico W WiFi/BLE chip.
 
 ## License
 

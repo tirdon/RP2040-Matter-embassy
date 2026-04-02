@@ -1,3 +1,4 @@
 .DS_Store
 target/
 cyw43-firmware/
+Cargo.lock
