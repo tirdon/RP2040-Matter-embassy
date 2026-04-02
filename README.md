@@ -1,49 +1,48 @@
 # Matter Light — Raspberry Pi Pico W (Rust)
 
-A Matter-compatible device implementation for the Raspberry Pi Pico W using the Embassy async runtime.
-
-## Project Status
-
-- **`src/main.rs`**: Current "Hello World" test (Blinks the onboard LED via CYW43).
-- **`src/main_matter.rs`**: The full Matter On/Off Light implementation.
+A Matter-compatible On/Off Light device for the Raspberry Pi Pico W, built with Embassy and rs-matter-embassy.
 
 ## Requirements
 
 - **Rust nightly** with `thumbv6m-none-eabi` target
-- **elf2uf2-rs** (for USB bootloader flashing) or **probe-rs** (for debug probes)
+- **elf2uf2-rs** (USB bootloader flashing) or **probe-rs** (debug probe flashing + logs)
 
 ```sh
 rustup default nightly
 rustup target add thumbv6m-none-eabi
-cargo install elf2uf2-rs
 ```
 
-## Build & Flash (USB Bootloader)
+## Build & Flash
 
-1. **Enter BOOTSEL Mode**: Hold the **BOOTSEL** button on your Pico W while plugging it into your USB port.
-2. **Build and Convert**:
+### Option 1: UF2 via USB Bootloader
+
+1. Build the firmware:
    ```sh
    cargo build --release
-   elf2uf2-rs target/thumbv6m-none-eabi/release/matter matter.uf2
+   elf2uf2-rs target/thumbv6m-none-eabi/release/matter output.uf2
    ```
-3. **Flash**: Copy `matter.uf2` to the `RPI-RP2` volume.
+2. Hold **BOOTSEL** on the Pico W while plugging it into USB.
+3. Copy the UF2 to the mounted volume:
    ```sh
-   cp matter.uf2 /Volumes/RPI-RP2/
+   cp output.uf2 /Volumes/RPI-RP2/
    ```
 
-## Swapping Implementations
+### Option 2: Debug Probe (with log output)
 
-To switch back to the Matter implementation:
+Requires a Picoprobe, CMSIS-DAP adapter, or similar SWD debug probe.
+
 ```sh
-mv src/main.rs src/main_blink.rs
-mv src/main_matter.rs src/main.rs
+cargo install probe-rs-tools
+cargo run --release
 ```
 
-## Technologies Used
+Log output (via `defmt`/RTT) is only available with a debug probe.
 
-- [Embassy](https://embassy.dev): Async runtime for embedded Rust.
-- [rs-matter-embassy](https://github.com/sysgrok/rs-matter-embassy): Matter protocol stack for Embassy.
-- [cyw43](https://github.com/embassy-rs/embassy/tree/main/cyw43): Driver for the Pico W WiFi/BLE chip.
+## Technologies
+
+- [Embassy](https://embassy.dev) — async runtime for embedded Rust
+- [rs-matter-embassy](https://github.com/sysgrok/rs-matter-embassy) — Matter protocol stack for Embassy
+- [CYW43](https://github.com/embassy-rs/embassy/tree/main/cyw43) — Pico W WiFi/BLE driver
 
 ## License
 
