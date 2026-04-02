@@ -1,4 +1,4 @@
-# Matter Light — Raspberry Pi Pico W (Rust)
+# Matter Light — Raspberry Pi Pico W (Rust) (NOT WORKING YET)
 
 A Matter-compatible device implementation for the Raspberry Pi Pico W using the Embassy async runtime.
 

@@ -1,83 +1,261 @@
+//! Simple Matter On/Off Light for Raspberry Pi Pico W.
+//!
+//! Uses WiFi as the main transport and BLE for commissioning.
+//! Based on the rs-matter-embassy rp example.
+
 #![no_std]
 #![no_main]
 
-use cyw43::aligned_bytes;
+use core::mem::MaybeUninit;
+use core::pin::pin;
+use core::ptr::addr_of_mut;
+
+use bt_hci::controller::ExternalController;
+
 use cyw43_pio::PioSpi;
+
 use embassy_executor::Spawner;
+use embassy_futures::select::select;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::{DMA_CH0, PIO0};
+use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
 use embassy_rp::pio::{InterruptHandler, Pio};
+use embassy_rp::usb::{self, Driver};
 use embassy_time::{Duration, Timer};
+
 use embedded_alloc::LlffHeap;
-use static_cell::StaticCell;
-use {defmt::unwrap, panic_rtt_target as _};
+
+use panic_probe as _;
+
+use log::info;
+
+use rs_matter_embassy::epoch::epoch;
+use rs_matter_embassy::matter::data_model::cluster_basic_information::BasicInfoConfig;
+use rs_matter_embassy::matter::data_model::cluster_on_off;
+use rs_matter_embassy::matter::data_model::device_types::DEV_TYPE_ON_OFF_LIGHT;
+use rs_matter_embassy::matter::data_model::objects::{Dataver, Endpoint, HandlerCompat, Node};
+use rs_matter_embassy::matter::data_model::system_model::descriptor;
+use rs_matter_embassy::matter::utils::init::InitMaybeUninit;
+use rs_matter_embassy::matter::utils::select::Coalesce;
+use rs_matter_embassy::rand::rp::rp_rand;
+use rs_matter_embassy::stack::persist::DummyPersist;
+use rs_matter_embassy::stack::test_device::{
+    TEST_BASIC_COMM_DATA, TEST_DEV_ATT, TEST_PID, TEST_VID,
+};
+use rs_matter_embassy::stack::MdnsType;
+use rs_matter_embassy::wireless::wifi::rp::Cyw43WifiController;
+use rs_matter_embassy::wireless::wifi::{
+    EmbassyWifi, EmbassyWifiMatterStack, PreexistingWifiDriver,
+};
+use rs_matter_embassy::wireless::{EmbassyBle, PreexistingBleController};
+use rtt_target::rtt_init_log;
+
+macro_rules! mk_static {
+    ($t:ty) => {{
+        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
+        #[deny(unused_attributes)]
+        let x = STATIC_CELL.uninit();
+        x
+    }};
+    ($t:ty,$val:expr) => {{
+        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
+        #[deny(unused_attributes)]
+        let x = STATIC_CELL.uninit().write(($val));
+        x
+    }};
+}
+
+bind_interrupts!(struct Irqs {
+    PIO0_IRQ_0 => InterruptHandler<PIO0>;
+    USBCTRL_IRQ => usb::InterruptHandler<USB>;
+});
 
 #[global_allocator]
 static HEAP: LlffHeap = LlffHeap::empty();
 
-bind_interrupts!(struct Irqs {
-    PIO0_IRQ_0 => InterruptHandler<PIO0>;
-});
-
-type Bus = cyw43_pio::SpiBus<Output<'static>, PioSpi<'static, PIO0, 0>>;
-
-#[embassy_executor::task]
-async fn wifi_task(
-    runner: cyw43::Runner<'static, Bus>,
-) -> ! {
-    runner.run().await
-}
-
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    // Initialize heap
+    // `rs-matter` uses the `x509` crate which (still) needs a few kilos of heap space
     {
-        use core::mem::MaybeUninit;
-        const HEAP_SIZE: usize = 1024;
+        const HEAP_SIZE: usize = 8192;
+
         static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
-        unsafe { HEAP.init(core::ptr::addr_of_mut!(HEAP_MEM) as usize, HEAP_SIZE) }
+        unsafe { HEAP.init(addr_of_mut!(HEAP_MEM) as usize, HEAP_SIZE) }
     }
 
+    // == Step 1: ==
+    // Necessary `embassy-rp` and `cyw43` initialization boilerplate
+
     let p = embassy_rp::init(Default::default());
-    
-    // CYW43 setup for LED control on Pico W
-    let fw = aligned_bytes!("../cyw43-firmware/43439A0.bin");
-    let clm = aligned_bytes!("../cyw43-firmware/43439A0_clm.bin");
-    let btfw = aligned_bytes!("../cyw43-firmware/43439A0_btfw.bin");
+
+    rtt_init_log!(log::LevelFilter::Info);
+
+    let driver = Driver::new(p.USB, Irqs);
+    spawner.spawn(logger_task(driver)).unwrap();
+
+    info!("Starting...");
+
+    #[cfg(feature = "skip-cyw43-firmware")]
+    let (fw, clm, btfw) = (&[], &[], &[]);
+
+    #[cfg(not(feature = "skip-cyw43-firmware"))]
+    let (fw, clm, btfw) = {
+        // IMPORTANT
+        //
+        // Download and make sure these files from https://github.com/embassy-rs/embassy/tree/main/cyw43-firmware
+        // are available in `./examples/rp-pico-w`. (should be automatic)
+        //
+        // IMPORTANT
+        let fw = include_bytes!("../../cyw43-firmware/43439A0.bin");
+        let clm = include_bytes!("../../cyw43-firmware/43439A0_clm.bin");
+        let btfw = include_bytes!("../../cyw43-firmware/43439A0_btfw.bin");
+        (fw, clm, btfw)
+    };
 
     let pwr = Output::new(p.PIN_23, Level::Low);
     let cs = Output::new(p.PIN_25, Level::High);
     let mut pio = Pio::new(p.PIO0, Irqs);
-    
-    // PioSpi::new signature: (common, sm, freq, irq, cs, mosi, clk, dma)
-    // Frequency is FixedU32, 1MHz is a safe default.
     let spi = PioSpi::new(
-        &mut pio.common, 
-        pio.sm0, 
-        embassy_rp::pio::Fixed::from_bits(0x01000), // Approximate 1MHz if bits are scaled
-        pio.irq0, 
-        cs, 
-        p.PIN_24, 
-        p.PIN_29, 
-        p.DMA_CH0
+        &mut pio.common,
+        pio.sm0,
+        cyw43_pio::DEFAULT_CLOCK_DIVIDER,
+        pio.irq0,
+        cs,
+        p.PIN_24,
+        p.PIN_29,
+        p.DMA_CH0,
     );
 
-    static STATE: StaticCell<cyw43::State> = StaticCell::new();
-    let state = STATE.init(cyw43::State::new());
-    let (_net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw, btfw).await;
-    
-    unwrap!(spawner.spawn(wifi_task(runner)));
-
+    let state = mk_static!(cyw43::State, cyw43::State::new());
+    let (net_device, bt_device, mut control, runner) =
+        cyw43::new_with_bluetooth(state, pwr, spi, fw, btfw).await;
+    spawner.spawn(cyw43_task(runner)).unwrap();
     control.init(clm).await;
-    control.set_power_management(cyw43::PowerManagementMode::PowerSave).await;
 
-    defmt::info!("Hello World! Blinking LED...");
+    let controller: ExternalController<_, 10> = ExternalController::new(bt_device);
 
-    loop {
-        control.gpio_set(0, true).await; // LED On
-        Timer::after(Duration::from_millis(500)).await;
-        control.gpio_set(0, false).await; // LED Off
-        Timer::after(Duration::from_millis(500)).await;
-    }
+    // == Step 2: ==
+    // Statically allocate the Matter stack.
+    // For MCUs, it is best to allocate it statically, so as to avoid program stack blowups (its memory footprint is ~ 35 to 50KB).
+    // It is also (currently) a mandatory requirement when the wireless stack variation is used.
+    let stack = mk_static!(EmbassyWifiMatterStack<()>).init_with(EmbassyWifiMatterStack::init(
+        &BasicInfoConfig {
+            vid: TEST_VID,
+            pid: TEST_PID,
+            hw_ver: 2,
+            sw_ver: 1,
+            sw_ver_str: "1",
+            serial_no: "aabbccdd",
+            device_name: "MyLight",
+            product_name: "ACME Light",
+            vendor_name: "ACME",
+        },
+        TEST_BASIC_COMM_DATA,
+        &TEST_DEV_ATT,
+        MdnsType::Builtin,
+        epoch,
+        rp_rand,
+    ));
+
+    // == Step 3: ==
+    // Our "light" on-off cluster.
+    // Can be anything implementing `rs_matter::data_model::AsyncHandler`
+    let on_off = cluster_on_off::OnOffCluster::new(Dataver::new_rand(stack.matter().rand()));
+
+    // Chain our endpoint clusters with the
+    // (root) Endpoint 0 system clusters in the final handler
+    let handler = stack
+        .root_handler()
+        // Our on-off cluster, on Endpoint 1
+        .chain(
+            LIGHT_ENDPOINT_ID,
+            cluster_on_off::ID,
+            HandlerCompat(&on_off),
+        )
+        // Each Endpoint needs a Descriptor cluster too
+        // Just use the one that `rs-matter` provides out of the box
+        .chain(
+            LIGHT_ENDPOINT_ID,
+            descriptor::ID,
+            HandlerCompat(descriptor::DescriptorCluster::new(Dataver::new_rand(
+                stack.matter().rand(),
+            ))),
+        );
+
+    // == Step 4: ==
+    // Run the Matter stack with our handler
+    // Using `pin!` is completely optional, but saves some memory due to `rustc`
+    // not being very intelligent w.r.t. stack usage in async functions
+    //
+    // This step can be repeated in that the stack can be stopped and started multiple times, as needed.
+    let mut matter = pin!(stack.run(
+        // The Matter stack needs Wifi
+        EmbassyWifi::new(
+            PreexistingWifiDriver::new(net_device, Cyw43WifiController::new(control)),
+            stack
+        ),
+        // The Matter stack needs BLE
+        EmbassyBle::new(PreexistingBleController::new(controller), stack),
+        // The Matter stack needs a persister to store its state
+        // `EmbassyPersist`+`EmbassyKvBlobStore` saves to a user-supplied NOR Flash region
+        // However, for this demo and for simplicity, we use a dummy persister that does nothing
+        DummyPersist,
+        // Our `AsyncHandler` + `AsyncMetadata` impl
+        (NODE, handler),
+        // No user future to run
+        core::future::pending(),
+    ));
+
+    // Just for demoing purposes:
+    //
+    // Run a sample loop that simulates state changes triggered by the HAL
+    // Changes will be properly communicated to the Matter controllers
+    // (i.e. Google Home, Alexa) and other Matter devices thanks to subscriptions
+    let mut device = pin!(async {
+        loop {
+            // Simulate user toggling the light with a physical switch every 5 seconds
+            Timer::after(Duration::from_secs(5)).await;
+
+            // Toggle
+            on_off.set(!on_off.get());
+
+            // Let the Matter stack know that we have changed
+            // the state of our Light device
+            stack.notify_changed();
+
+            info!("Light toggled");
+        }
+    });
+
+    // Schedule the Matter run & the device loop together
+    select(&mut matter, &mut device).coalesce().await.unwrap();
 }
+
+#[embassy_executor::task]
+async fn cyw43_task(
+    runner: cyw43::Runner<'static, Output<'static>, PioSpi<'static, PIO0, 0, DMA_CH0>>,
+) -> ! {
+    runner.run().await
+}
+
+#[embassy_executor::task]
+async fn logger_task(driver: Driver<'static, USB>) {
+    embassy_usb_logger::run!(1024, log::LevelFilter::Info, driver);
+}
+
+/// Endpoint 0 (the root endpoint) always runs
+/// the hidden Matter system clusters, so we pick ID=1
+const LIGHT_ENDPOINT_ID: u16 = 1;
+
+/// The Matter Light device Node
+const NODE: Node = Node {
+    id: 0,
+    endpoints: &[
+        EmbassyWifiMatterStack::<()>::root_metadata(),
+        Endpoint {
+            id: LIGHT_ENDPOINT_ID,
+            device_types: &[DEV_TYPE_ON_OFF_LIGHT],
+            clusters: &[descriptor::CLUSTER, cluster_on_off::CLUSTER],
+        },
+    ],
+};
